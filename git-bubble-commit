@@ -1,0 +1,76 @@
+#!/bin/bash
+# This software is public domain.
+# For more information, please refer to <http://unlicense.org>
+
+topmost=$1
+shift
+
+tmp_git_copy=$(mktemp -d)
+tmp_patch=$(mktemp)
+
+cleanup () {
+	rm -rf "$tmp_git_copy"
+	rm -f "$tmp_patch"
+}
+
+trap "cleanup" EXIT
+
+## worktree workaround
+gitdir=$(git rev-parse --git-dir)
+gitdir=${gitdir%%worktrees/*}
+git clone --quiet --reference="$gitdir" . "$tmp_git_copy"
+cd "$tmp_git_copy" || exit
+
+commits=()
+for commit; do
+	if [[ $commit == *..* ]]; then
+		while read -r commit; do
+			commits+=("$(git rev-parse "$commit")")
+		done < <(git rev-list "$commit")
+	else
+		commits+=("$(git rev-parse "$commit")")
+	fi
+done
+
+if ((${#commits[@]} == 0)); then
+	echo "No valid commits found"
+	exit
+fi
+
+{
+	for ((i=${#commits[@]}-1; i >= 0; i--)); do
+		git format-patch -1 --stdout "${commits[$i]}"
+	done
+} > "$tmp_patch"
+
+HEAD=$(git rev-parse --abbrev-ref HEAD)
+steps=0
+good=${commits[-1]}~1
+while read -r sha; do 
+	git checkout "$sha" &>/dev/null
+	if ! git apply --check "$tmp_patch" 2>/dev/null; then
+		bad=$sha
+		break
+	else
+		prev_good=$good
+		good=$sha
+		((steps++))
+	fi
+done < <(git log "$topmost..${commits[-1]}~2" --pretty=%H)
+
+if [[ -z $bad ]]; then
+	bad="$topmost~1"
+fi
+
+if ((steps > 0)); then
+	echo "Commit(s) can be moved up $steps commits:"
+	echo "   $(git show -s --format="%h: %s" "$good")"
+	for commit in "${commits[@]}"; do
+		echo " > $(git show -s --format="%h: %s" "$commit")"
+	done
+	echo "   $(git show -s --format="%h: %s" "$prev_good")"
+else
+	echo "Commits cannot be moved"
+fi
+
+git checkout "$HEAD" &>/dev/null
